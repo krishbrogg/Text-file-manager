@@ -325,7 +325,22 @@ async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(e)
         await msg.reply_text("❌ Clean failed")
+#================== stop ======================
 
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    # cancel merge process if active
+    if uid in user_merge_data:
+        data = user_merge_data.pop(uid)
+
+        for f in data.get("files", []):
+            if os.path.exists(f):
+                os.remove(f)
+
+        await update.message.reply_text("🛑 Task cancelled.")
+    else:
+        await update.message.reply_text("No active task to stop.")
 
 # ================= MAIN =================
 
@@ -337,6 +352,7 @@ def main():
     app.add_handler(CommandHandler("merge", merge))
     app.add_handler(CommandHandler("shuffle", shuffle))
     app.add_handler(CommandHandler("clean", clean))
+    app.add_handler(CommandHandler("stop", stop))
 
     app.add_handler(MessageHandler(filters.Document.ALL, collect_files))
     app.add_error_handler(error_handler)
