@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-from config import BOT_TOKEN, CHANNEL_ID
+from config import BOT_TOKEN, CHANNEL_ID, ADMIN_ID
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,6 +21,22 @@ logger = logging.getLogger(__name__)
 user_merge_data = {}
 processed_file_ids = set()  # 🔥 global duplicate protection
 
+#================== broadcast===================
+
+import sqlite3
+
+conn = sqlite3.connect("users.db")
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    name TEXT,
+    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
 # ================= VALIDATION =================
 
 def is_valid_txt(doc: Document):
@@ -64,20 +80,35 @@ import asyncio
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    user_id = user.id
     name = user.first_name or "User"
+    username = user.username or ""
+
+    # ✅ Save user for broadcast
+    try:
+        cursor.execute("""
+INSERT INTO users (user_id, username, name, last_active)
+VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(user_id) DO UPDATE SET last_active=CURRENT_TIMESTAMP
+""", (user_id, username, name))
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"DB Error: {e}")
 
     # 🎯 typing effect
     await update.message.reply_chat_action("typing")
     await asyncio.sleep(1)
 
+    # 🎨 UI Message
     await update.message.reply_text(
         f"👋 Hello *{name}*\n\n"
         "✨ *Text Toolkit Bot Activated*\n\n"
         "Handle your text files smarter, faster, cleaner.\n\n"
         "━━━━━━━━━━━━━━━\n"
         "🔘 *Quick Actions*\n\n"
-        "✂️ `/split `\n"
-        "📎 `/merge `\n"
+        "✂️ `/split`\n"
+        "📎 `/merge`\n"
         "🧹 `/clean`\n"
         "🔀 `/shuffle`\n"
         "🛑 `/stop`\n"
@@ -342,6 +373,36 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No active task to stop.")
 
+#===========≠=========== broadcast handles =======================
+
+async def broadcast(update, context):
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_ID:
+        return await update.message.reply_text("❌ You are not allowed!")
+
+    if not context.args:
+        return await update.message.reply_text("Usage: /broadcast your message")
+
+    message = " ".join(context.args)
+
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+
+    success = 0
+    failed = 0
+
+    for user in users:
+        try:
+            await context.bot.send_message(chat_id=user[0], text=message)
+            success += 1
+        except:
+            failed += 1
+
+    await update.message.reply_text(
+        f"✅ Broadcast Done!\n\nSuccess: {success}\nFailed: {failed}"
+    )
+
 # ================= MAIN =================
 
 def main():
@@ -353,6 +414,7 @@ def main():
     app.add_handler(CommandHandler("shuffle", shuffle))
     app.add_handler(CommandHandler("clean", clean))
     app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(CommandHandler("broadcast", broadcast))
 
     app.add_handler(MessageHandler(filters.Document.ALL, collect_files))
     app.add_error_handler(error_handler)
