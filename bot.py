@@ -91,7 +91,7 @@ INSERT INTO users (user_id, username, name, last_active)
 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(user_id) DO UPDATE SET last_active=CURRENT_TIMESTAMP
 """, (user_id, username, name))
-        )
+        
         conn.commit()
     except Exception as e:
         print(f"DB Error: {e}")
