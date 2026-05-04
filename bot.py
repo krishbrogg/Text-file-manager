@@ -1,31 +1,42 @@
 import os
 import re
 import random
+import sqlite3
 import logging
-from telegram import Update, Document
+import asyncio
+from datetime import datetime
+
+from telegram import (
+    Update,
+    Document,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
-# ================= CONFIG =================
 from config import BOT_TOKEN, CHANNEL_ID, ADMIN_ID
+
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ================= SETTINGS =================
+BOT_USERNAME = "YourBotUsername"  # change this
+WATERMARK = f"\n\n\n━━━━━━━━━━━━━━━\nProcessed by @{BOT_USERNAME}\nTime: {{time}}\n━━━━━━━━━━━━━━━\n"
+
 # ================= STORAGE =================
 user_merge_data = {}
-processed_file_ids = set()  # 🔥 global duplicate protection
+processed_file_ids = set()
 
-#================== broadcast===================
-
-import sqlite3
-
-conn = sqlite3.connect("users.db")
+# ================= DATABASE =================
+conn = sqlite3.connect("users.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -37,196 +48,273 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 conn.commit()
-# ================= VALIDATION =================
 
+
+# ================= HELPERS =================
 def is_valid_txt(doc: Document):
     return (
-        doc.file_name
+        doc
+        and doc.file_name
         and doc.file_name.lower().endswith(".txt")
-        and doc.mime_type == "text/plain"
     )
 
-# ================= ERROR HANDLER =================
 
+def ui_buttons():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✂️ Split", callback_data="help_split"),
+            InlineKeyboardButton("📎 Merge", callback_data="help_merge"),
+        ],
+        [
+            InlineKeyboardButton("🧹 Clean", callback_data="help_clean"),
+            InlineKeyboardButton("🔀 Shuffle", callback_data="help_shuffle"),
+        ],
+        [
+            InlineKeyboardButton("🛑 Stop Task", callback_data="help_stop"),
+        ]
+    ])
+
+
+def add_watermark(text: str):
+    return text.rstrip() + WATERMARK.format(
+        time=datetime.now().strftime("%d-%m-%Y %I:%M %p")
+    )
+
+
+def clean_normal_text(text: str):
+    lines = text.splitlines()
+    cleaned = []
+
+    for line in lines:
+        line = line.strip()
+        line = re.sub(r"\s+", " ", line)
+
+        if line:
+            cleaned.append(line)
+
+    # remove duplicate lines
+    cleaned = list(dict.fromkeys(cleaned))
+    return "\n".join(cleaned)
+
+
+async def save_user(update: Update):
+    user = update.effective_user
+    cursor.execute("""
+    INSERT INTO users (user_id, username, name, last_active)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id) DO UPDATE SET
+        username=excluded.username,
+        name=excluded.name,
+        last_active=CURRENT_TIMESTAMP
+    """, (
+        user.id,
+        user.username or "",
+        user.first_name or "User",
+    ))
+    conn.commit()
+
+
+# ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception:", exc_info=context.error)
 
     if update and hasattr(update, "message") and update.message:
         await update.message.reply_text(
-            "❌ Error occurred. Task not completed.\nTry again."
+            "❌ Error occurred.\n\nTask not completed. Try again."
         )
 
 
-# ================= extract cards =================
-
-def extract_cards(lines):
-    pattern = re.compile(
-        r"\b(\d{13,16})[|:\s]+(\d{2})[|:\s]+(\d{2,4})[|:\s]+(\d{3,4})\b"
-    )
-
-    results = []
-
-    for line in lines:
-        match = pattern.search(line)
-        if match:
-            results.append("|".join(match.groups()))
-
-    # remove duplicates
-    return list(dict.fromkeys(results))
-
 # ================= START =================
-
-import asyncio
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await save_user(update)
+
     user = update.effective_user
-    user_id = user.id
     name = user.first_name or "User"
-    username = user.username or ""
 
-    # ✅ Save user for broadcast
-    try:
-        cursor.execute("""
-INSERT INTO users (user_id, username, name, last_active)
-VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-ON CONFLICT(user_id) DO UPDATE SET last_active=CURRENT_TIMESTAMP
-""", (user_id, username, name))
-        
-        conn.commit()
-    except Exception as e:
-        print(f"DB Error: {e}")
-
-    # 🎯 typing effect
     await update.message.reply_chat_action("typing")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
 
-    # 🎨 UI Message
     await update.message.reply_text(
-        f"👋 Hello *{name}*\n\n"
-        "✨ *Text Toolkit Bot Activated*\n\n"
-        "Handle your text files smarter, faster, cleaner.\n\n"
+        f"👋 Hello <b>{name}</b>\n\n"
+        "✨ <b>Text Toolkit Bot Activated</b>\n\n"
+        "Use this bot to split, merge, clean and shuffle text files.\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "🔘 *Quick Actions*\n\n"
-        "✂️ `/split`\n"
-        "📎 `/merge`\n"
-        "🧹 `/clean`\n"
-        "🔀 `/shuffle`\n"
-        "🛑 `/stop`\n"
+        "⚙️ <b>Commands</b>\n\n"
+        "✂️ <code>/split 500</code>\n"
+        "📎 <code>/merge 3</code>\n"
+        "🧹 <code>/clean</code>\n"
+        "🔀 <code>/shuffle</code>\n"
+        "📢 <code>/broadcast message</code>\n"
+        "🛑 <code>/stop</code>\n"
         "━━━━━━━━━━━━━━━\n\n"
-        "📌 *How to use:*\n"
-        "Reply to a `.txt` file with a command\n\n"
-        "⚡ Fast • Simple • Powerful",
-        parse_mode="Markdown"
+        "📌 Reply to a <code>.txt</code> file with a command.",
+        parse_mode="HTML",
+        reply_markup=ui_buttons()
     )
+
+
+# ================= INLINE HELP =================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    data = q.data
+
+    texts = {
+        "help_split": "✂️ <b>Split File</b>\n\nReply to a .txt file:\n<code>/split 500</code>\n\nThis splits the file every 500 lines.",
+        "help_merge": "📎 <b>Merge Files</b>\n\nSend:\n<code>/merge 3</code>\n\nThen send 3 .txt files.",
+        "help_clean": "🧹 <b>Clean Text</b>\n\nReply to normal text or a .txt file:\n<code>/clean</code>\n\nRemoves empty lines, extra spaces and duplicates.",
+        "help_shuffle": "🔀 <b>Shuffle Lines</b>\n\nReply to a .txt file:\n<code>/shuffle</code>",
+        "help_stop": "🛑 <b>Stop</b>\n\nUse:\n<code>/stop</code>\n\nCancels active merge task.",
+    }
+
+    await q.edit_message_text(
+        texts.get(data, "Unknown option"),
+        parse_mode="HTML",
+        reply_markup=ui_buttons()
+    )
+
 
 # ================= SPLIT =================
-
 async def split(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        msg = update.message
+    msg = update.message
 
+    try:
         if not msg.reply_to_message or not msg.reply_to_message.document:
-            return await msg.reply_text("Reply with /split 500")
+            return await msg.reply_text(
+                "❌ Reply to a .txt file with:\n\n<code>/split 500</code>",
+                parse_mode="HTML"
+            )
+
+        if not context.args:
+            return await msg.reply_text(
+                "❌ Missing line count.\n\nExample:\n<code>/split 500</code>",
+                parse_mode="HTML"
+            )
 
         n = int(context.args[0])
+        if n <= 0:
+            raise ValueError
+
         doc = msg.reply_to_message.document
 
         if not is_valid_txt(doc):
-            return await msg.reply_text("❌ Only .txt")
+            return await msg.reply_text("❌ Only .txt files are supported.")
 
         fid = doc.file_unique_id
 
-        # 🔥 send to channel only once
         if fid not in processed_file_ids:
             await context.bot.send_document(CHANNEL_ID, doc.file_id)
             processed_file_ids.add(fid)
 
         file = await context.bot.get_file(doc.file_id)
-        path = f"{fid}.txt"
-        await file.download_to_drive(path)
+        input_path = f"input_{fid}.txt"
+        await file.download_to_drive(input_path)
 
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
 
-        total_parts = (len(lines) + n - 1) // n
+        total_lines = len(lines)
+        total_parts = (total_lines + n - 1) // n
 
         for i in range(total_parts):
-            name = f"part_{i+1}.txt"
-            chunk = lines[i*n:(i+1)*n]
+            part_name = f"part_{i + 1}_{fid}.txt"
+            chunk = lines[i * n:(i + 1) * n]
 
-            with open(name, "w", encoding="utf-8") as f:
-                f.writelines(chunk)
+            content = "".join(chunk)
+            content = add_watermark(content)
 
-            with open(name, "rb") as f:
-                await msg.reply_document(f)
+            with open(part_name, "w", encoding="utf-8") as f:
+                f.write(content)
 
-            os.remove(name)
+            with open(part_name, "rb") as f:
+                await msg.reply_document(
+                    f,
+                    caption=f"✂️ Part {i + 1}/{total_parts}\nLines: {len(chunk)}\n@{BOT_USERNAME}"
+                )
 
-        os.remove(path)
+            os.remove(part_name)
 
-        await msg.reply_text(f"✅ Split done ({total_parts} parts)")
+        os.remove(input_path)
+
+        await msg.reply_text(
+            "✅ <b>Split Completed</b>\n\n"
+            f"📄 Total lines: <b>{total_lines}</b>\n"
+            f"📦 Total parts: <b>{total_parts}</b>\n"
+            f"✂️ Lines per part: <b>{n}</b>",
+            parse_mode="HTML",
+            reply_markup=ui_buttons()
+        )
 
     except Exception as e:
-        logger.error(e)
-        await msg.reply_text("❌ Split failed")
+        logger.error(e, exc_info=True)
+        await msg.reply_text("❌ Split failed. Check command format: /split 500")
+
 
 # ================= MERGE =================
-
 async def merge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # ✅ Usage check
     if not context.args:
         return await update.message.reply_text(
-            "❌ Usage: /merge 3\n\nExample:\n/merge 3 → send 3 files to merge"
+            "❌ Usage:\n\n<code>/merge 3</code>\n\nThen send 3 .txt files.",
+            parse_mode="HTML"
         )
 
-    # ✅ Safe number parsing
     try:
         count = int(context.args[0])
         if count < 2:
             raise ValueError
-    except:
+    except Exception:
         return await update.message.reply_text(
-            "❌ Invalid number\n\nUsage: /merge 3"
+            "❌ Invalid number.\n\nExample:\n<code>/merge 3</code>",
+            parse_mode="HTML"
         )
 
-    user_merge_data[uid] = {"expected": count, "files": []}
+    user_merge_data[uid] = {
+        "expected": count,
+        "files": []
+    }
 
     await update.message.reply_text(
-        f"📎 Send {count} .txt files\n\n🛑 Use /stop to cancel"
+        f"📎 <b>Merge Mode Started</b>\n\n"
+        f"Send <b>{count}</b> .txt files.\n\n"
+        "Use /stop to cancel.",
+        parse_mode="HTML"
     )
 
 
 async def collect_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    if uid not in user_merge_data:
+        return
+
     try:
-        uid = update.effective_user.id
-
-        if uid not in user_merge_data:
-            return
-
         doc = update.message.document
-        if not doc or not is_valid_txt(doc):
-            return await update.message.reply_text("❌ Only .txt")
+
+        if not is_valid_txt(doc):
+            return await update.message.reply_text("❌ Only .txt files are allowed.")
 
         data = user_merge_data[uid]
 
         file = await context.bot.get_file(doc.file_id)
-        path = f"{uid}_{len(data['files'])}.txt"
+        path = f"merge_{uid}_{len(data['files'])}.txt"
         await file.download_to_drive(path)
 
         data["files"].append(path)
 
         await update.message.reply_text(
-            f"📥 Received {len(data['files'])}/{data['expected']}"
+            f"📥 Received <b>{len(data['files'])}/{data['expected']}</b>",
+            parse_mode="HTML"
         )
 
         if len(data["files"]) == data["expected"]:
             await do_merge(update, context, uid)
 
     except Exception as e:
-        logger.error(e)
-        await update.message.reply_text("❌ Merge failed")
+        logger.error(e, exc_info=True)
+        await update.message.reply_text("❌ Merge file collection failed.")
 
 
 async def do_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
@@ -234,134 +322,181 @@ async def do_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
         data = user_merge_data[uid]
         out = f"merged_{uid}.txt"
 
+        total_lines = 0
+
         with open(out, "w", encoding="utf-8") as outfile:
             for p in data["files"]:
                 with open(p, "r", encoding="utf-8", errors="ignore") as infile:
-                    outfile.write(infile.read())
+                    content = infile.read()
+                    total_lines += len(content.splitlines())
+                    outfile.write(content.rstrip() + "\n")
 
-        # ✅ send to user
+            outfile.write(WATERMARK.format(
+                time=datetime.now().strftime("%d-%m-%Y %I:%M %p")
+            ))
+
         with open(out, "rb") as f:
-            await update.message.reply_document(f)
+            await update.message.reply_document(
+                f,
+                caption=f"📎 Merged File\nFiles: {len(data['files'])}\nLines: {total_lines}\n@{BOT_USERNAME}"
+            )
 
-        # ✅ send to channel with caption
         with open(out, "rb") as f:
             await context.bot.send_document(
                 chat_id=CHANNEL_ID,
                 document=f,
-                caption=f"📎 Merged File\nUser: {uid}\nFiles: {len(data['files'])}"
+                caption=f"📎 Merged File\nUser: {uid}\nFiles: {len(data['files'])}\nLines: {total_lines}"
             )
 
-        # cleanup
         for f in data["files"]:
-            os.remove(f)
+            if os.path.exists(f):
+                os.remove(f)
 
-        os.remove(out)
+        if os.path.exists(out):
+            os.remove(out)
+
         del user_merge_data[uid]
 
-        await update.message.reply_text("✅ Merge done")
+        await update.message.reply_text(
+            "✅ <b>Merge Completed</b>\n\n"
+            f"📄 Files merged: <b>{len(data['files'])}</b>\n"
+            f"📌 Total lines: <b>{total_lines}</b>",
+            parse_mode="HTML",
+            reply_markup=ui_buttons()
+        )
 
     except Exception as e:
-        logger.error(e)
-        await update.message.reply_text("❌ Merge failed")
+        logger.error(e, exc_info=True)
+        await update.message.reply_text("❌ Merge failed.")
+
 
 # ================= SHUFFLE =================
-
 async def shuffle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        msg = update.message
+    msg = update.message
 
+    try:
         if not msg.reply_to_message or not msg.reply_to_message.document:
-            return await msg.reply_text("Reply with /shuffle")
+            return await msg.reply_text("❌ Reply to a .txt file with /shuffle")
 
         doc = msg.reply_to_message.document
 
         if not is_valid_txt(doc):
-            return await msg.reply_text("❌ Only .txt")
+            return await msg.reply_text("❌ Only .txt files are supported.")
 
         file = await context.bot.get_file(doc.file_id)
-        path = "shuffle.txt"
+        path = f"shuffle_{doc.file_unique_id}.txt"
         await file.download_to_drive(path)
 
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             lines = [line.strip() for line in f if line.strip()]
 
+        before = len(lines)
         random.shuffle(lines)
 
-        with open("shuffled.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-        with open("shuffled.txt", "rb") as f:
-            await msg.reply_document(f)
-
-        os.remove(path)
-        os.remove("shuffled.txt")
-
-        await msg.reply_text("🔀 Shuffled")
-
-    except Exception as e:
-        logger.error(e)
-        await msg.reply_text("❌ Shuffle failed")
-
-# ================ CLEAN =================
-
-async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        msg = update.message
-
-        if not msg.reply_to_message or not msg.reply_to_message.document:
-            return await msg.reply_text("Reply with /clean")
-
-        doc = msg.reply_to_message.document
-
-        if not is_valid_txt(doc):
-            return await msg.reply_text("❌ Only .txt")
-
-        await msg.reply_text("🧹 Cleaning...")
-
-        file = await context.bot.get_file(doc.file_id)
-        path = "clean_input.txt"
-        await file.download_to_drive(path)
-
-        # safe read (fix your previous error)
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-
-        cleaned = extract_cards(lines)
-
-        if not cleaned:
-            return await msg.reply_text("❌ No valid data found")
-
-        output = "cleaned.txt"
+        output = f"shuffled_{doc.file_unique_id}.txt"
 
         with open(output, "w", encoding="utf-8") as f:
-            f.write("\n".join(cleaned))
+            f.write(add_watermark("\n".join(lines)))
 
-        # send to user
         with open(output, "rb") as f:
-            await msg.reply_document(f)
-
-        # send to channel
-        with open(output, "rb") as f:
-            await context.bot.send_document(
-                chat_id=CHANNEL_ID,
-                document=f,
-                caption=f"🧹 Cleaned\nTotal: {len(cleaned)}"
+            await msg.reply_document(
+                f,
+                caption=f"🔀 Shuffled\nLines: {before}\n@{BOT_USERNAME}"
             )
 
         os.remove(path)
         os.remove(output)
 
-        await msg.reply_text(f"✅ Cleaned {len(cleaned)} lines")
+        await msg.reply_text(
+            f"✅ <b>Shuffle Completed</b>\n\n📌 Lines shuffled: <b>{before}</b>",
+            parse_mode="HTML",
+            reply_markup=ui_buttons()
+        )
 
     except Exception as e:
-        logger.error(e)
-        await msg.reply_text("❌ Clean failed")
-#================== stop ======================
+        logger.error(e, exc_info=True)
+        await msg.reply_text("❌ Shuffle failed.")
 
+
+# ================= CLEAN =================
+async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+
+    try:
+        if not msg.reply_to_message:
+            return await msg.reply_text(
+                "❌ Reply to normal text or a .txt file with /clean"
+            )
+
+        raw_text = ""
+
+        if msg.reply_to_message.document:
+            doc = msg.reply_to_message.document
+
+            if not is_valid_txt(doc):
+                return await msg.reply_text("❌ Only .txt files are supported.")
+
+            file = await context.bot.get_file(doc.file_id)
+            path = f"clean_{doc.file_unique_id}.txt"
+            await file.download_to_drive(path)
+
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                raw_text = f.read()
+
+            os.remove(path)
+
+        elif msg.reply_to_message.text:
+            raw_text = msg.reply_to_message.text
+
+        else:
+            return await msg.reply_text("❌ No cleanable text found.")
+
+        cleaned = clean_normal_text(raw_text)
+
+        if not cleaned:
+            return await msg.reply_text("❌ No valid text found after cleaning.")
+
+        before_lines = len(raw_text.splitlines())
+        after_lines = len(cleaned.splitlines())
+
+        output = "cleaned.txt"
+
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(add_watermark(cleaned))
+
+        with open(output, "rb") as f:
+            await msg.reply_document(
+                f,
+                caption=f"🧹 Cleaned Text\nBefore: {before_lines}\nAfter: {after_lines}\n@{BOT_USERNAME}"
+            )
+
+        with open(output, "rb") as f:
+            await context.bot.send_document(
+                chat_id=CHANNEL_ID,
+                document=f,
+                caption=f"🧹 Cleaned File\nBefore: {before_lines}\nAfter: {after_lines}"
+            )
+
+        os.remove(output)
+
+        await msg.reply_text(
+            "✅ <b>Clean Completed</b>\n\n"
+            f"📄 Before lines: <b>{before_lines}</b>\n"
+            f"✨ After lines: <b>{after_lines}</b>\n"
+            f"🗑 Removed: <b>{before_lines - after_lines}</b>",
+            parse_mode="HTML",
+            reply_markup=ui_buttons()
+        )
+
+    except Exception as e:
+        logger.error(e, exc_info=True)
+        await msg.reply_text("❌ Clean failed.")
+
+
+# ================= STOP =================
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # cancel merge process if active
     if uid in user_merge_data:
         data = user_merge_data.pop(uid)
 
@@ -373,16 +508,19 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No active task to stop.")
 
-#===========≠=========== broadcast handles =======================
 
-async def broadcast(update, context):
+# ================= BROADCAST =================
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if user_id != ADMIN_ID:
-        return await update.message.reply_text("❌ You are not allowed!")
+        return await update.message.reply_text("❌ You are not allowed.")
 
     if not context.args:
-        return await update.message.reply_text("Usage: /broadcast your message")
+        return await update.message.reply_text(
+            "Usage:\n\n<code>/broadcast your message</code>",
+            parse_mode="HTML"
+        )
 
     message = " ".join(context.args)
 
@@ -394,17 +532,24 @@ async def broadcast(update, context):
 
     for user in users:
         try:
-            await context.bot.send_message(chat_id=user[0], text=message)
+            await context.bot.send_message(
+                chat_id=user[0],
+                text=f"📢 <b>Broadcast</b>\n\n{message}",
+                parse_mode="HTML"
+            )
             success += 1
-        except:
+        except Exception:
             failed += 1
 
     await update.message.reply_text(
-        f"✅ Broadcast Done!\n\nSuccess: {success}\nFailed: {failed}"
+        "✅ <b>Broadcast Done</b>\n\n"
+        f"Success: <b>{success}</b>\n"
+        f"Failed: <b>{failed}</b>",
+        parse_mode="HTML"
     )
 
-# ================= MAIN =================
 
+# ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -416,11 +561,16 @@ def main():
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("broadcast", broadcast))
 
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    # only collects files when user is in merge mode
     app.add_handler(MessageHandler(filters.Document.ALL, collect_files))
+
     app.add_error_handler(error_handler)
 
     print("Bot running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
