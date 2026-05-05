@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ================= SETTINGS =================
-BOT_USERNAME = "YourBotUsername"  # change this
+BOT_USERNAME = "TXT_manage_robot"  # change this
 WATERMARK = f"\n\n\n━━━━━━━━━━━━━━━\nProcessed by @{BOT_USERNAME}\nTime: {{time}}\n━━━━━━━━━━━━━━━\n"
 
 # ================= STORAGE =================
